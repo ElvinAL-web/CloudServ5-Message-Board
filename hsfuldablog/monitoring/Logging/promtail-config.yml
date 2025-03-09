@@ -1,0 +1,66 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /data/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'container'
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: 'job'
+
+  - job_name: system
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: system
+          __path__: /var/log/*.log
+
+  - job_name: remote_docker_instances
+    journal:
+      max_age: 12h
+      labels:
+        job: systemd-journal
+    relabel_configs:
+      - source_labels: ['__journal__systemd_unit']
+        target_label: 'unit'
+      
+  - job_name: docker_instance_1
+    static_configs:
+      - targets:
+          - docker-instance-1
+        labels:
+          job: docker-instance-1
+          instance: docker-instance-1
+          __path__: /var/log/docker/containers/*/*.log
+
+  - job_name: docker_instance_2
+    static_configs:
+      - targets:
+          - docker-instance-2
+        labels:
+          job: docker-instance-2
+          instance: docker-instance-2
+          __path__: /var/log/docker/containers/*/*.log
+
+  - job_name: docker_instance_3
+    static_configs:
+      - targets:
+          - docker-instance-3
+        labels:
+          job: docker-instance-3
+          instance: docker-instance-3
+          __path__: /var/log/docker/containers/*/*.log 

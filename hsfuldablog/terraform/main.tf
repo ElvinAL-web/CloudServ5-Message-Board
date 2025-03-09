@@ -496,52 +496,52 @@ resource "openstack_networking_secgroup_rule_v2" "monitoring_all_outbound" {
 resource "openstack_networking_secgroup_rule_v2" "monitoring_grafana" {
   security_group_id = openstack_networking_secgroup_v2.monitoring_secgroup.id
   direction         = "ingress"
-  ethertype        = "IPv4"
-  protocol         = "tcp"
-  port_range_min   = 3000
-  port_range_max   = 3000
-  remote_ip_prefix = "0.0.0.0/0"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 3000
+  port_range_max    = 3000
+  remote_ip_prefix  = "0.0.0.0/0"
 }
 
 resource "openstack_networking_secgroup_rule_v2" "monitoring_prometheus" {
   security_group_id = openstack_networking_secgroup_v2.monitoring_secgroup.id
   direction         = "ingress"
-  ethertype        = "IPv4"
-  protocol         = "tcp"
-  port_range_min   = 9090
-  port_range_max   = 9090
-  remote_ip_prefix = "0.0.0.0/0"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 9090
+  port_range_max    = 9090
+  remote_ip_prefix  = "0.0.0.0/0"
 }
 
 resource "openstack_networking_secgroup_rule_v2" "monitoring_node_exporter" {
   security_group_id = openstack_networking_secgroup_v2.monitoring_secgroup.id
   direction         = "ingress"
-  ethertype        = "IPv4"
-  protocol         = "tcp"
-  port_range_min   = 9100
-  port_range_max   = 9100
-  remote_ip_prefix = "0.0.0.0/0"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 9100
+  port_range_max    = 9100
+  remote_ip_prefix  = "0.0.0.0/0"
 }
 
 resource "openstack_networking_secgroup_rule_v2" "monitoring_cadvisor" {
   security_group_id = openstack_networking_secgroup_v2.monitoring_secgroup.id
   direction         = "ingress"
-  ethertype        = "IPv4"
-  protocol         = "tcp"
-  port_range_min   = 8081
-  port_range_max   = 8081
-  remote_ip_prefix = "0.0.0.0/0"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 8081
+  port_range_max    = 8081
+  remote_ip_prefix  = "0.0.0.0/0"
 }
 
 # Allow internal network communication
 resource "openstack_networking_secgroup_rule_v2" "monitoring_internal" {
   security_group_id = openstack_networking_secgroup_v2.monitoring_secgroup.id
   direction         = "ingress"
-  ethertype        = "IPv4"
-  protocol         = "tcp"
-  port_range_min   = 1
-  port_range_max   = 65535
-  remote_ip_prefix = "192.168.255.0/24"  # Your subnet CIDR
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 1
+  port_range_max    = 65535
+  remote_ip_prefix  = "192.168.255.0/24"  # Your subnet CIDR
 }
 
 # Create a dedicated port for the monitoring instance
@@ -595,7 +595,8 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
       gnupg \
       lsb-release \
       docker.io \
-      docker-compose >> $LOGFILE 2>&1
+      docker-compose \
+      unzip >> $LOGFILE 2>&1
     
     # Add current user to docker group
     usermod -aG docker ubuntu
@@ -1323,6 +1324,504 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
     }
     EOF
     
+    # Setup Loki and Promtail for centralized logging
+    echo "Setting up centralized logging with Loki and Promtail..." >> $LOGFILE
+    
+    # Create directories for Loki and Promtail
+    mkdir -p /opt/monitoring/Logging
+    
+    # Create Loki configuration
+    cat > /opt/monitoring/Logging/loki-config.yml << EOF
+    auth_enabled: false
+
+    server:
+      http_listen_port: 3100
+
+    ingester:
+      lifecycler:
+        address: 127.0.0.1
+        ring:
+          kvstore:
+            store: inmemory
+          replication_factor: 1
+        final_sleep: 0s
+      chunk_idle_period: 5m
+      chunk_retain_period: 30s
+      max_transfer_retries: 0
+
+    schema_config:
+      configs:
+        - from: 2020-10-24
+          store: boltdb-shipper
+          object_store: filesystem
+          schema: v11
+          index:
+            prefix: index_
+            period: 24h
+
+    storage_config:
+      boltdb_shipper:
+        active_index_directory: /data/loki/index
+        cache_location: /data/loki/index_cache
+        cache_ttl: 24h
+        shared_store: filesystem
+      filesystem:
+        directory: /data/loki/chunks
+
+    limits_config:
+      enforce_metric_name: false
+      reject_old_samples: true
+      reject_old_samples_max_age: 168h
+    EOF
+
+    # Create Promtail configuration
+    cat > /opt/monitoring/Logging/promtail-config.yml << EOF
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+
+    positions:
+      filename: /data/positions.yaml
+
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: docker
+        docker_sd_configs:
+          - host: unix:///var/run/docker.sock
+            refresh_interval: 5s
+        relabel_configs:
+          - source_labels: ['__meta_docker_container_name']
+            regex: '/(.*)'
+            target_label: 'container'
+          - source_labels: ['__meta_docker_container_name']
+            regex: '/(.*)'
+            target_label: 'job'
+
+      - job_name: system
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: system
+              __path__: /var/log/*.log
+
+      - job_name: remote_docker_instances
+        static_configs:
+          - targets:
+              - docker_instance_1
+            labels:
+              job: docker-instance-1
+              instance: ${openstack_compute_instance_v2.docker_instances[0].access_ip_v4}
+              __path__: /var/log/docker/containers/*/*.log
+          - targets:
+              - docker_instance_2
+            labels:
+              job: docker-instance-2
+              instance: ${openstack_compute_instance_v2.docker_instances[1].access_ip_v4}
+              __path__: /var/log/docker/containers/*/*.log
+          - targets:
+              - docker_instance_3
+            labels:
+              job: docker-instance-3
+              instance: ${openstack_compute_instance_v2.docker_instances[2].access_ip_v4}
+              __path__: /var/log/docker/containers/*/*.log
+    EOF
+
+    # Create Docker Compose file for Loki and Promtail
+    cat > /opt/monitoring/Logging/docker-compose.yml << EOF
+    version: '3.9'
+
+    services:
+      loki:
+        image: grafana/loki:latest
+        container_name: loki
+        ports:
+          - "3100:3100"
+        volumes:
+          - ./loki-config.yml:/etc/loki/local-config.yaml
+          - loki_data:/data/loki
+        command: -config.file=/etc/loki/local-config.yaml
+        restart: unless-stopped
+        networks:
+          - monitoring-network
+
+      promtail:
+        image: grafana/promtail:latest
+        container_name: promtail
+        volumes:
+          - ./promtail-config.yml:/etc/promtail/config.yml
+          - /var/log:/var/log
+          - /var/lib/docker/containers:/var/lib/docker/containers
+          - promtail_data:/data
+        command: -config.file=/etc/promtail/config.yml
+        depends_on:
+          - loki
+        restart: unless-stopped
+        networks:
+          - monitoring-network
+
+    networks:
+      monitoring-network:
+        external: false
+
+    volumes:
+      loki_data:
+      promtail_data:
+    EOF
+
+    # Create Grafana datasource for Loki
+    cat > /opt/monitoring/grafana/provisioning/datasources/loki.yml << EOF
+    apiVersion: 1
+
+    datasources:
+      - name: Loki
+        type: loki
+        access: proxy
+        url: http://loki:3100
+        jsonData:
+          maxLines: 1000
+    EOF
+
+    # Create Logs Dashboard
+    echo "Creating Grafana dashboard for logs..." >> $LOGFILE
+    cat > /opt/monitoring/grafana/dashboards/logs_dashboard.json << 'EOF'
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": "-- Grafana --",
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "editable": true,
+      "gnetId": null,
+      "graphTooltip": 0,
+      "id": 2,
+      "links": [],
+      "panels": [
+        {
+          "datasource": "Loki",
+          "description": "Logs from all Docker instances",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "id": 2,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "expr": "{job=~\"docker-instance.*\"}",
+              "refId": "A"
+            }
+          ],
+          "title": "Docker Instances Logs",
+          "type": "logs"
+        },
+        {
+          "datasource": "Loki",
+          "description": "Log volume by instance",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "drawStyle": "line",
+                "fillOpacity": 10,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "spanNulls": true,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 9
+          },
+          "id": 4,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom"
+            },
+            "tooltip": {
+              "mode": "single"
+            }
+          },
+          "pluginVersion": "8.0.6",
+          "targets": [
+            {
+              "expr": "sum by(instance) (rate({job=~\"docker-instance.*\"}[5m]))",
+              "legendFormat": "{{instance}}",
+              "refId": "A"
+            }
+          ],
+          "title": "Log Volume by Instance",
+          "type": "timeseries"
+        },
+        {
+          "datasource": "Loki",
+          "description": "Logs filtered by search term",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 17
+          },
+          "id": 6,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": false,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "expr": "{job=~\"docker-instance.*\"} |= \"$search\"",
+              "refId": "A"
+            }
+          ],
+          "title": "Filtered Logs",
+          "type": "logs"
+        }
+      ],
+      "refresh": "10s",
+      "schemaVersion": 30,
+      "style": "dark",
+      "tags": [],
+      "templating": {
+        "list": [
+          {
+            "allValue": null,
+            "current": {
+              "selected": false,
+              "text": "error",
+              "value": "error"
+            },
+            "description": null,
+            "error": null,
+            "hide": 0,
+            "includeAll": false,
+            "label": "Search",
+            "multi": false,
+            "name": "search",
+            "options": [
+              {
+                "selected": true,
+                "text": "error",
+                "value": "error"
+              },
+              {
+                "selected": false,
+                "text": "warning",
+                "value": "warning"
+              },
+              {
+                "selected": false,
+                "text": "info",
+                "value": "info"
+              }
+            ],
+            "query": "error,warning,info",
+            "skipUrlSync": false,
+            "type": "custom"
+          }
+        ]
+      },
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "",
+      "title": "Application Logs Dashboard",
+      "uid": "application-logs",
+      "version": 1
+    }
+    EOF
+
+    # Create a Promtail installation script for the Docker instances
+    cat > /opt/monitoring/Logging/install-promtail.sh << 'EOF'
+    #!/bin/bash
+
+    # Script to install Promtail on a Docker instance
+    # Usage: ./install-promtail.sh <loki_hostname_or_ip>
+
+    set -e
+
+    LOKI_HOST=${1:-loki}
+    PROMTAIL_VERSION="2.9.1"
+    INSTALL_DIR="/opt/promtail"
+    CONFIG_FILE="/opt/promtail/promtail-config.yml"
+    SERVICE_FILE="/etc/systemd/system/promtail.service"
+
+    # Check if running as root
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "This script must be run as root"
+        exit 1
+    fi
+
+    # Create installation directory
+    mkdir -p $INSTALL_DIR
+
+    # Download Promtail
+    echo "Downloading Promtail..."
+    wget -q -O /tmp/promtail.zip "https://github.com/grafana/loki/releases/download/v${PROMTAIL_VERSION}/promtail-linux-amd64.zip"
+    unzip -o /tmp/promtail.zip -d $INSTALL_DIR
+    chmod +x $INSTALL_DIR/promtail-linux-amd64
+    ln -sf $INSTALL_DIR/promtail-linux-amd64 /usr/local/bin/promtail
+
+    # Create Promtail configuration
+    cat > $CONFIG_FILE << EOCFG
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
+
+    positions:
+      filename: /opt/promtail/positions.yaml
+
+    clients:
+      - url: http://${LOKI_HOST}:3100/loki/api/v1/push
+
+    scrape_configs:
+      - job_name: docker
+        docker_sd_configs:
+          - host: unix:///var/run/docker.sock
+            refresh_interval: 5s
+        relabel_configs:
+          - source_labels: ['__meta_docker_container_name']
+            regex: '/(.*)'
+            target_label: 'container'
+
+      - job_name: system
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: system
+              __path__: /var/log/*.log
+
+      - job_name: docker_logs
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: docker
+              __path__: /var/lib/docker/containers/*/*.log
+    EOCFG
+
+    # Create systemd service file
+    cat > $SERVICE_FILE << EOSVC
+    [Unit]
+    Description=Promtail Log Collector
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=root
+    ExecStart=/usr/local/bin/promtail -config.file=${CONFIG_FILE}
+    Restart=always
+    RestartSec=10
+
+    [Install]
+    WantedBy=multi-user.target
+    EOSVC
+
+    # Enable and start service
+    systemctl daemon-reload
+    systemctl enable promtail
+    systemctl start promtail
+
+    echo "Promtail installed and configured to send logs to ${LOKI_HOST}:3100"
+    echo "Check status with: systemctl status promtail"
+    EOF
+
+    chmod +x /opt/monitoring/Logging/install-promtail.sh
+    
+    # Install Promtail on Docker instances
+    echo "Installing Promtail on Docker instances..." >> $LOGFILE
+    MONITORING_IP=$(hostname -I | awk '{print $1}')
+    
+    for i in 0 1 2; do
+      DOCKER_IP=${openstack_compute_instance_v2.docker_instances[i].access_ip_v4}
+      echo "Installing Promtail on Docker instance $((i+1)) ($DOCKER_IP)..." >> $LOGFILE
+      scp -o StrictHostKeyChecking=no /opt/monitoring/Logging/install-promtail.sh ubuntu@$DOCKER_IP:/tmp/install-promtail.sh >> $LOGFILE 2>&1 || echo "Failed to copy script to instance $((i+1))" >> $LOGFILE
+      ssh -o StrictHostKeyChecking=no ubuntu@$DOCKER_IP "sudo bash /tmp/install-promtail.sh $MONITORING_IP" >> $LOGFILE 2>&1 || echo "Failed to install Promtail on instance $((i+1))" >> $LOGFILE
+    done
+    
+    # Start Loki and Promtail
+    echo "Starting Loki and Promtail..." >> $LOGFILE
+    cd /opt/monitoring/Logging
+    docker-compose down --remove-orphans || true
+    docker-compose up -d
+    
     # Start monitoring stack
     echo "Starting monitoring stack..." >> $LOGFILE
     cd /opt/monitoring
@@ -1348,9 +1847,11 @@ resource "openstack_networking_floatingip_v2" "monitoring_floating_ip" {
 
 # Output monitoring URLs
 output "monitoring_urls" {
+  description = "URLs for accessing monitoring dashboards"
   value = {
     grafana    = "http://${openstack_networking_floatingip_v2.monitoring_floating_ip.address}:3000"
     prometheus = "http://${openstack_networking_floatingip_v2.monitoring_floating_ip.address}:9090"
+    logs       = "http://${openstack_networking_floatingip_v2.monitoring_floating_ip.address}:3000/d/application-logs/application-logs-dashboard"
   }
 }
 
@@ -1358,4 +1859,14 @@ output "monitoring_urls" {
 output "application_url" {
   description = "URL to access the application"
   value       = "http://${openstack_networking_floatingip_v2.lb_floating_ip.address}:8080"
+}
+
+resource "openstack_networking_secgroup_rule_v2" "monitoring_loki" {
+  security_group_id = openstack_networking_secgroup_v2.monitoring_secgroup.id
+  direction         = "ingress"
+  ethertype         = "IPv4"
+  protocol          = "tcp"
+  port_range_min    = 3100
+  port_range_max    = 3100
+  remote_ip_prefix  = "0.0.0.0/0"
 }
