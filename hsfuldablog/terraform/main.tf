@@ -1413,19 +1413,19 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
               - docker_instance_1
             labels:
               job: docker-instance-1
-              instance: ${openstack_compute_instance_v2.docker_instances[0].access_ip_v4}
+              instance: docker-instance-1
               __path__: /var/log/docker/containers/*/*.log
           - targets:
               - docker_instance_2
             labels:
               job: docker-instance-2
-              instance: ${openstack_compute_instance_v2.docker_instances[1].access_ip_v4}
+              instance: docker-instance-2
               __path__: /var/log/docker/containers/*/*.log
           - targets:
               - docker_instance_3
             labels:
               job: docker-instance-3
-              instance: ${openstack_compute_instance_v2.docker_instances[2].access_ip_v4}
+              instance: docker-instance-3
               __path__: /var/log/docker/containers/*/*.log
     EOF
 
@@ -1716,30 +1716,30 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
 
     set -e
 
-    LOKI_HOST=${1:-loki}
+    LOKI_HOST=$${1:-loki}
     PROMTAIL_VERSION="2.9.1"
     INSTALL_DIR="/opt/promtail"
     CONFIG_FILE="/opt/promtail/promtail-config.yml"
     SERVICE_FILE="/etc/systemd/system/promtail.service"
 
     # Check if running as root
-    if [ "$(id -u)" -ne 0 ]; then
+    if [ "$$(id -u)" -ne 0 ]; then
         echo "This script must be run as root"
         exit 1
     fi
 
     # Create installation directory
-    mkdir -p $INSTALL_DIR
+    mkdir -p $${INSTALL_DIR}
 
     # Download Promtail
     echo "Downloading Promtail..."
-    wget -q -O /tmp/promtail.zip "https://github.com/grafana/loki/releases/download/v${PROMTAIL_VERSION}/promtail-linux-amd64.zip"
-    unzip -o /tmp/promtail.zip -d $INSTALL_DIR
-    chmod +x $INSTALL_DIR/promtail-linux-amd64
-    ln -sf $INSTALL_DIR/promtail-linux-amd64 /usr/local/bin/promtail
+    wget -q -O /tmp/promtail.zip "https://github.com/grafana/loki/releases/download/v$${PROMTAIL_VERSION}/promtail-linux-amd64.zip"
+    unzip -o /tmp/promtail.zip -d $${INSTALL_DIR}
+    chmod +x $${INSTALL_DIR}/promtail-linux-amd64
+    ln -sf $${INSTALL_DIR}/promtail-linux-amd64 /usr/local/bin/promtail
 
     # Create Promtail configuration
-    cat > $CONFIG_FILE << EOCFG
+    cat > $${CONFIG_FILE} << EOCFG
     server:
       http_listen_port: 9080
       grpc_listen_port: 0
@@ -1748,7 +1748,7 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
       filename: /opt/promtail/positions.yaml
 
     clients:
-      - url: http://${LOKI_HOST}:3100/loki/api/v1/push
+      - url: http://$${LOKI_HOST}:3100/loki/api/v1/push
 
     scrape_configs:
       - job_name: docker
@@ -1778,7 +1778,7 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
     EOCFG
 
     # Create systemd service file
-    cat > $SERVICE_FILE << EOSVC
+    cat > $${SERVICE_FILE} << EOSVC
     [Unit]
     Description=Promtail Log Collector
     After=network.target
@@ -1786,7 +1786,7 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
     [Service]
     Type=simple
     User=root
-    ExecStart=/usr/local/bin/promtail -config.file=${CONFIG_FILE}
+    ExecStart=/usr/local/bin/promtail -config.file=$${CONFIG_FILE}
     Restart=always
     RestartSec=10
 
@@ -1799,7 +1799,7 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
     systemctl enable promtail
     systemctl start promtail
 
-    echo "Promtail installed and configured to send logs to ${LOKI_HOST}:3100"
+    echo "Promtail installed and configured to send logs to $${LOKI_HOST}:3100"
     echo "Check status with: systemctl status promtail"
     EOF
 
@@ -1810,10 +1810,14 @@ resource "openstack_compute_instance_v2" "monitoring_instance" {
     MONITORING_IP=$(hostname -I | awk '{print $1}')
     
     for i in 0 1 2; do
-      DOCKER_IP=${openstack_compute_instance_v2.docker_instances[i].access_ip_v4}
-      echo "Installing Promtail on Docker instance $((i+1)) ($DOCKER_IP)..." >> $LOGFILE
-      scp -o StrictHostKeyChecking=no /opt/monitoring/Logging/install-promtail.sh ubuntu@$DOCKER_IP:/tmp/install-promtail.sh >> $LOGFILE 2>&1 || echo "Failed to copy script to instance $((i+1))" >> $LOGFILE
-      ssh -o StrictHostKeyChecking=no ubuntu@$DOCKER_IP "sudo bash /tmp/install-promtail.sh $MONITORING_IP" >> $LOGFILE 2>&1 || echo "Failed to install Promtail on instance $((i+1))" >> $LOGFILE
+      case $i in
+        0) DOCKER_IP="${openstack_compute_instance_v2.docker_instances[0].access_ip_v4}" ;;
+        1) DOCKER_IP="${openstack_compute_instance_v2.docker_instances[1].access_ip_v4}" ;;
+        2) DOCKER_IP="${openstack_compute_instance_v2.docker_instances[2].access_ip_v4}" ;;
+      esac
+      echo "Installing Promtail on Docker instance $(($i+1)) ($DOCKER_IP)..." >> $LOGFILE
+      scp -o StrictHostKeyChecking=no /opt/monitoring/Logging/install-promtail.sh ubuntu@$DOCKER_IP:/tmp/install-promtail.sh >> $LOGFILE 2>&1 || echo "Failed to copy script to instance $(($i+1))" >> $LOGFILE
+      ssh -o StrictHostKeyChecking=no ubuntu@$DOCKER_IP "sudo bash /tmp/install-promtail.sh $MONITORING_IP" >> $LOGFILE 2>&1 || echo "Failed to install Promtail on instance $(($i+1))" >> $LOGFILE
     done
     
     # Start Loki and Promtail
